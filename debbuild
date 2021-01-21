@@ -157,7 +157,6 @@ sub lua_pmain {
   my ($L)  = @_;
   my $dt = $L->touserdata(-1);
   my $m = ${$dt}->{m};
-  print("IN macro: $m\n");
   $L->openlibs;                 # open libraries
   $L->register("print", \&lua_print);
   my $st = $L->loadstring($m);
@@ -187,7 +186,7 @@ sub lua_macro {
                   $m."\n# end of the ommited macro\n");
     return '';
   }
-  vdebug("Lua macro processing:\n".$m."\n# end of the macro\n", 3, "lua_macro");
+  vdebug("Lua macro:\n".$m."\n# end of the macro\n", 3, "lua_macro");
   my $dt = {m => $m, stdout => ''};
   my $lsh = lua_get('Lua::API::State->new()');
   if ( $lsh ) {
