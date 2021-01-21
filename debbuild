@@ -110,24 +110,82 @@ my %files_files=();
 my $debug_level = 3;
 
 my $lua_present;
-my $lua_api = {};
 
 $lua_present = eval {
     require Lua::API;
     1;
 };
 $lua_present //= 0;
-if ( $lua_present ) {
-  foreach my $lv ( qw/Lua::API::GLOBALSINDEX Lua::API::GCCOLLECT Lua::API::GCSTOP Lua::API::GCRESTART
-                      Lua::API::RELEASE Lua::API::State Lua::API::MULTRET/ ) {
-    eval('$lua_api->{\''.$lv.'\'} = '.$lv.';');
-  }
-}
 
 sub lua_get {
   my ($v, $d) = @_;
-  return $lua_api->{$v} if defined($lua_api->{$v});
-  return $d;
+  my $r;
+  eval('$r = '.$v);
+  return defined($r) ? $r : $d;
+}
+
+sub lua_traceback  {
+  my ( $L ) = @_;
+  return 1
+    if (! $L->isstring(1));  # 'message' not a string? keep it intact
+  $L->getfield(lua_get('Lua::API::GLOBALSINDEX'), "debug");
+  if (! $L->istable(-1)) {
+    $L->pop( 1);
+    return 1;
+  }
+  $L->getfield(-1, "traceback");
+  if (! $L->isfunction( -1)) {
+    $L->pop(2);
+    return 1;
+  }
+  $L->pushvalue(1);          # pass error message
+  $L->pushinteger(2);        # skip this function and traceback
+  $L->call(2, 1);            # call debug.traceback
+  return 1;
+}
+
+sub lua_pmain {
+  my ($L)  = @_;
+  my $dt = $L->touserdata(-1);
+  my $m = ${$dt};
+  print("IN macro: $m\n");
+  $L->openlibs;                 # open libraries
+  my $st = $L->loadstring($m);
+  if ( $st == 0 ) {
+    my $base = $L->gettop();            # function index
+    $L->pushcfunction(\&lua_traceback); # push traceback function
+    $L->insert($base);                  # put it under chunk and args
+    $st = $L->pcall(0, 0, $base);
+    $L->remove($base);                  # remove traceback function
+  }
+  if ($st && !$L->isnil(-1)) {
+    my $msg = $L->tostring(-1);
+    $msg = "(error object is not a string)" if ! defined $msg;
+    print(STDERR "Lua Error: ".$msg."\n");
+    $L->pop(1);
+  }
+  return 0;
+}
+
+sub lua_macro {
+  my ($m) = @_;
+  unless ( $lua_present ) {
+    print(STDERR "WARNING: Lua module not loaded! The following macro is ommited:\n".
+                  $arg."\n# end of the ommited macro\n");
+  }
+  vdebug("Lua macro processing:\n".$m."\n# end of the macro\n", 3, "lua_macro");
+  my $lsh = lua_get('Lua::API::State->new()');
+  if ( $lsh ) {
+    $L = $lsh->open();  # create state
+    if (! defined $L ) {
+      print(STDERR "Lua Error: Cannot create state: not enough memory!\n");
+    }
+    my $st = $L->cpcall(\&lua_pmain, \$m);
+    $L->close;
+  } else {
+    print(STDERR "Lua Error: Unable to open Lua::API::State!($lsh)\n");
+  }
+  return '';
 }
 
 #### main ####
@@ -143,6 +201,7 @@ lsb_detection();
 parse_cmd();
 
 print version() if defined $specglobals{verbose};
+print "Lua: ".($lua_present ? lua_get('Lua::API::RELEASE') : 'No Lua module loaded')."\n" if $specglobals{verbose};
 
 if ($cmdopts{type} eq 's') {
   install_sdeb($specglobals{srcpkg});
@@ -1959,15 +2018,13 @@ sub expandmacros {
       # 'positive verbosity'
       defined $specglobals{$prefix} ? s/$initvalue/$arg/g : s/$initvalue//g;
     } elsif ($prefix eq 'lua') {
-      # eliminate
-      s/$initvalue//g;
+      s/$initvalue/lua_macro($arg)/eg;
     }
   }
   pos = 0; # reset to start of $_
 
-  # VZhestkov / just remove %{**} and %{lua:} for a while. Need to check if possible to implement.
   s/%\{\??\*{1,2}\}//g; # replace 'all arguments'
-  s/\A%\{lua:.*\}\z//s;
+  s/\A%\{lua:(.*)\}\z/lua_macro($1)/es;
 
   # Expand 'simple' '%{macros}': %define's and %{all_the_rest}
   while (/%\{([a-z_]\w*)}/ig) {
