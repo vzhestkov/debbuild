@@ -144,13 +144,26 @@ sub lua_traceback  {
   return 1;
 }
 
+sub lua_print {
+  my ($L) = @_;
+  my $p = $L->tostring(1);
+  $L->pushstring("dt");
+  $L->gettable(lua_get('Lua::API::REGISTRYINDEX'));
+  my $dt = ${$L->touserdata(-1)};
+  $dt->{stdout} .= $p."\n";
+}
+
 sub lua_pmain {
   my ($L)  = @_;
   my $dt = $L->touserdata(-1);
-  my $m = ${$dt};
+  my $m = ${$dt}->{m};
   print("IN macro: $m\n");
   $L->openlibs;                 # open libraries
+  $L->register("print", \&lua_print);
   my $st = $L->loadstring($m);
+  $L->pushstring("dt");
+  $L->pushlightuserdata(\$dt);
+  $L->settable(lua_get('Lua::API::REGISTRYINDEX'));
   if ( $st == 0 ) {
     my $base = $L->gettop();            # function index
     $L->pushcfunction(\&lua_traceback); # push traceback function
@@ -171,21 +184,23 @@ sub lua_macro {
   my ($m) = @_;
   unless ( $lua_present ) {
     print(STDERR "WARNING: Lua module not loaded! The following macro is ommited:\n".
-                  $arg."\n# end of the ommited macro\n");
+                  $m."\n# end of the ommited macro\n");
+    return '';
   }
   vdebug("Lua macro processing:\n".$m."\n# end of the macro\n", 3, "lua_macro");
+  my $dt = {m => $m, stdout => ''};
   my $lsh = lua_get('Lua::API::State->new()');
   if ( $lsh ) {
-    $L = $lsh->open();  # create state
+    my $L = $lsh->open();  # create state
     if (! defined $L ) {
       print(STDERR "Lua Error: Cannot create state: not enough memory!\n");
     }
-    my $st = $L->cpcall(\&lua_pmain, \$m);
+    my $st = $L->cpcall(\&lua_pmain, \$dt);
     $L->close;
   } else {
     print(STDERR "Lua Error: Unable to open Lua::API::State!($lsh)\n");
   }
-  return '';
+  return $dt->{stdout};
 }
 
 #### main ####
