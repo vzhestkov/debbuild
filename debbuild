@@ -87,6 +87,7 @@ my %pkgdata = (main => {source => ''});
 my @pkglist = ('main');	#sigh
 # Files listing.  Embedding this in %pkgdata would be, um, messy.
 my %filelist;
+my %filesdef;
 my %doclist;
 my @buildrequires;
 my @buildconflicts;
@@ -105,6 +106,8 @@ my $fh;
 
 # Store filelist files from "%files -f <filename>"
 my %files_files=();
+
+my $debug_level = 3;
 
 #### main ####
 
@@ -211,6 +214,12 @@ exit 0;
 
 #### end main ####
 
+sub vdebug {
+  my ($msg, $dl, $tag) = @_;
+  print(STDERR "DEBUG".(defined($tag) ? "[".$tag."]" : "").": ".$msg."\n")
+    if $debug_level && ((not defined($dl)) || $debug_level >= $dl);
+}
+
 ## load_static_config()
 # Load build-time configuration for debbuild itself.
 # The Makefile stores this configuration as a debrc-format
@@ -258,7 +267,19 @@ sub load_config {
           $value .= $_;
           last unless /\\$/;
         }
+        # Victor Zhestkov / multiline macros workaround.
+        $value =~ s/\s+\\\n/\\\n/g;
+        vdebug("$macro = $value", 5, "load_config/multiline");
       }
+      if ($value =~ s/%\{lua:\s*$/\{lua:\n/) { # multi-line LUA macro
+        while (<MACROS>) {
+          $value .= $_;
+          my $t = $value;
+          last if extract_bracketed($t, '{}');
+        }
+        $value = '%'.$value;
+      }
+      vdebug("$macro = $value", 5, "load_config");
       store_value('define', $macro, $eq eq '=' ? $specglobals{$value} : $value);
     }
     close MACROS;
@@ -559,7 +580,8 @@ LINE: while (<$fh>) {
       if (defined $specglobals{$1}) {
         # This looks like a user-defined macro, possibly with arguments.
         # Wrap the whole thing in curly braces for easier processing.
-        s/^\s*%(.+)\s*$/%{$1}/ if defined $macroopts{$1};
+        # And avoid removing trailing new line symbol.
+        s/^\s*%(.+)\s*?(\n?)$/%{$1}$2/ if defined $macroopts{$1};
       } else {
         die _('Unknown tag \'%').$1._('\' at line ').$..
             _(' of ').$specfile."\n";
@@ -578,17 +600,12 @@ LINE: while (<$fh>) {
 
     # Generic %if..%else..%endif construct
     if (s/^\s*%if//) {
-      chomp( my $expr = lc expandmacros($_) );
+      chomp( my $expr = expandmacros($_) );
 
       if ($expr =~ /^[\d\s<=>&|\(\)+-]+$/) {
         # "plain" numeric expressions are evaluated as-is, except
         $expr =~ s/(\D)0(\d+)/$1$2/g; # shortcut 0%{?ubuntu} == 1204
       } else {
-        # got a logic statement we want to turn into a 1 or a 0.
-        # correctly "quote" the Boolean variables for Perl's eval below
-        $expr =~ s/"//g;
-        $expr =~ s/([\w\/]+)/"$1"/g;
-
         # Done in this order so we don't cascade incorrectly.
         # Yes, those spaces ARE correct in the replacements!
         $expr =~ s/==/ eq /g;
@@ -687,6 +704,7 @@ ENDIF: if (/^\s*%endif/) {
         my $tmp = expandmacros($n);
         $subname = /\s-n\s/ ? $tmp : "$pkgdata{main}{name}-$tmp";
       }
+      $filesdef{$subname} = 1 if ($stage eq "files");
       if ($f) {
         $files_files{$subname} = $f;
       }
@@ -700,7 +718,8 @@ ENDIF: if (/^\s*%endif/) {
       push @pkglist, $subname;
       # Hack the filename for the package into a Debian-tool-compatible format.  GRRRRRR!!!!!
       # Have I mentioned I hate Debian Policy?
-      ($pkgdata{$subname}{name} = $subname) =~ tr/_/-/;
+      # Package names are lower case only!
+      ($pkgdata{$subname}{name} = lc($subname)) =~ tr/_/-/;
       $pkgdata{$subname}{version} = $pkgdata{main}{version};
   # Build "same arch as previous package found" by default.  Where rpm just picks the
   # *very* last one, we want to allow arch<native>+arch-all
@@ -722,7 +741,7 @@ ENDIF: if (/^\s*%endif/) {
       ($stage,$subname) = ('prepost','main');
       Getopt::Long::GetOptionsFromString($_,
         # Rudimentary support for '-p <command>'
-        'p=s' => sub { $pkgdata{$subname}{$scriptlet} .= $_[1] },
+        'p=s' => sub { $pkgdata{$subname}{$scriptlet} .= $_[1]."\n" },
         # Magic to add entries to the right package
         'n=s' => sub { $subname = expandmacros($_[1]) },
         '<>'  => sub { $subname =
@@ -835,8 +854,12 @@ ENDIF: if (/^\s*%endif/) {
     elsif ($stage eq 'preamble') {
       if (/^(summary|name|epoch|version|release|
              group|copyright|url|packager):\s*(.+)/ix) {
-        $pkgdata{main}{lc $1} //= expandmacros($2);
-        $pkgdata{main}{lc $1} =~ tr/_/-/ if 'name' eq $1;
+        my $_v = lc($1);
+        $pkgdata{main}{$_v} //= expandmacros($2);
+        if ( $_v eq 'name' ) {
+          $pkgdata{main}{$_v} = lc($pkgdata{main}{$_v});
+          $pkgdata{main}{$_v} =~ tr/_/-/;
+        }
       } elsif (/^(vendor|buildroot):\s*(.+)\s*/i) {
         $specglobals{lc $1} = $2;
       } elsif (my ($srcnum, $src) = /^source(\d*):\s*(.+)\s*$/i) {
@@ -1233,8 +1256,10 @@ sub process_filesline {
   if (/\*/) { # will be 'globbed' later; will assume type 'file'
     $pkgdata{$subname}{post} .= "%{__chmod} $perms $_\n" if $perms ne '-';
   } else { # single entry; either 'directory' or 'file'
-    $pkgdata{$subname}{post} .= "if [ -d $_ ]; then %{__chmod} $defattr{dirmode} $_; fi\n" if $defattr{dirmode} ne '-';
-    $pkgdata{$subname}{post} .= "if [ -f $_ ]; then %{__chmod} $perms $_; fi\n" if $perms ne '-';
+    foreach my $pp (split) {
+      $pkgdata{$subname}{post} .= "if [ -d $pp ]; then %{__chmod} $defattr{dirmode} $pp; fi\n" if $defattr{dirmode} ne '-';
+      $pkgdata{$subname}{post} .= "if [ -f $pp ]; then %{__chmod} $perms $pp; fi\n" if $perms ne '-';
+    }
   }
 
 ##fixme
@@ -1333,16 +1358,20 @@ sub binpackage {
     my $debdir = expandmacros('%{_debdir}');
     mkdir "$debdir/$pkgdata{$pkg}{arch}" unless -e "$debdir/$pkgdata{$pkg}{arch}";
 
+    vdebug("$pkg(".$pkgdata{$pkg}{name}.") - [".(defined($filesdef{$pkg}) ? 1 : 0)." / ".
+           (defined($filelist{$pkg}) ? 1 : 0)."]", 3, "binpackage");
     # Skip building a package that doesn't have any files or dependencies.  True
     # metapackages don't have any files, but they depend on a bunch of things.
     # Packages with neither have, essentially, no content.
     next if
+        (not defined($filesdef{$pkg})) or (
         (
             (not $filelist{$pkg} or $filelist{$pkg} =~ /^\s*$/)
             and not $files_files{$pkg}
-        ) and (not $pkgdata{$pkg}{requires});
+        ) and (not $pkgdata{$pkg}{requires}));
 
     $filelist{$pkg} //= '';
+    vdebug("$pkg(".$pkgdata{$pkg}{name}.") - building...", 3, "binpackage/build");
 
     # Gotta do this first, otherwise we don't have a place to move files from %files
     mkdir "$specglobals{buildroot}/$pkg";
@@ -1426,13 +1455,14 @@ sub binpackage {
 
     # Munge things so that Debian tools don't choke on errant blank lines
     $pkgdata{$pkg}{description} =~ s/\s+$//g;	# Trim trailing blanks
-    $pkgdata{$pkg}{description} =~ s/^ $/ ./mg;	# Replace lines consisting of " \n" with " .\n"
+    $pkgdata{$pkg}{description} =~ s/^\s+$/ ./mg;	# Replace lines consisting of " \n" with " .\n"
 
     # Give an estimate of the installation size
     my ($installedsize) =
       qx($specglobals{__du} -s --apparent-size $specglobals{buildroot}/$pkg) =~
         /(\d+)/;
 
+    my $maintainer = defined $pkgdata{main}{packager} ? $pkgdata{main}{packager} : expandmacros('%{_deb_maintainer}');
     my $control = "Package: $pkgdata{$pkg}{name}\n".
 	'Version: '.format_version($pkg)."\n".
 	( defined $pkgdata{$pkg}{group} ?
@@ -1440,8 +1470,8 @@ sub binpackage {
 	"Priority: optional\n".
 	"Architecture: $pkgdata{$pkg}{arch}\n".
 	"Installed-Size: $installedsize\n".
-	( defined $pkgdata{main}{packager} ?
-	  "Maintainer: $pkgdata{main}{packager}\n" : '' ).
+	( $maintainer ?
+	  "Maintainer: $maintainer\n" : '' ).
 	"Description: $pkgdata{$pkg}{summary}\n$pkgdata{$pkg}{description}\n".
 	( defined $pkgdata{main}{url} ?
 	  "Homepage: $pkgdata{main}{url}\n" : '' );
@@ -1572,7 +1602,8 @@ sub splitver {
      $req .= $ver if $ver;
   }
   # Pick up the details of versioned build requirements
-  my ($pkg,$rel,$ver) = $req =~ /([\w.+-]+)\s*([><=]+)\s*([\w:.~+-]+)/;
+  my ($pkg,$rel,$ver) = $req =~ /([\w.+\-()]+)\s*([><=]+)\s*([\w:.~+-]+)/;
+  $pkg =~ s/\(([^\)]+)\)/-$1/g;
   $rel =~ s/^([><])$/$1$1/;
   return ($pkg,$rel,$ver);
 } # end splitver()
@@ -1734,6 +1765,7 @@ sub getreqs {
   my $reqliblist;
   foreach (@reqlist) {
     next if /not a dynamic executable/;
+    next if /statically linked/;
     next if m|/lib(?:64)?/ld-linux|;	# Hack! Hack!  PTHBTT!  (libc suxx0rz)
     next if /linux-(gate|vdso).so/;	# Kernel hackery for teh W1n!!1!1eleventy-one!1  (Don't ask.  Feh.)
 
@@ -1782,13 +1814,10 @@ sub install_sdeb {
 # Helper function for writing to the %macro storage(s)
 sub store_value {
   my ($caller, $key, $value) = @_;
-  # Handle multiline macro definitions
-  if ($value =~ s/\\$/\\\n/) {
-    while (<$fh>) {
-      $value .= $_;
-      last unless /\\$/;
-    }
-  }
+
+  $debug_level = $value if $key eq "_debbuild_debug_level";
+  vdebug("$caller: $key = $value", 5, "store_value");
+
   # Strip and store '%macro(options)'
   $macroopts{$key} = $1 if $key =~ s/\((.*)\)//;
   my $recipient = ( grep { lc $key eq $_ } qw(summary name version
@@ -1812,6 +1841,7 @@ sub store_value {
 sub expandmacros {
   local $_ = shift;
   return $_ unless /%/; # nothing to substitute
+  vdebug($_, 5, "expandmacros/in");
 
   # support for **some** %if constructs: handle '%{?conditional:macros}'
   # with nested curly braces, all in one go!
@@ -1882,7 +1912,7 @@ sub expandmacros {
   # handle '%{prefixed:macros}' with nested curly braces, all in one go!
   s/url2path/u2p/g;
   while (my ($prefix,$arg) = map { /{(\w+):(.+)}/ } bracelet() ) {
-    (my $initvalue = "%{$prefix:$arg}") =~ s/([?!{+}])/\\$1/g; # neutralize specials
+    (my $initvalue = "%{$prefix:$arg}") =~ s/([?!{+}*()])/\\$1/g; # neutralize specials
     $arg = expandmacros($arg);
     if ($prefix eq 'u2p') {
       # curious form of 'basename'? - strip domain host (and port)
@@ -1907,9 +1937,16 @@ sub expandmacros {
     } elsif ($prefix eq 'verbose') {
       # 'positive verbosity'
       defined $specglobals{$prefix} ? s/$initvalue/$arg/g : s/$initvalue//g;
+    } elsif ($prefix eq 'lua') {
+      # eliminate
+      s/$initvalue//g;
     }
   }
   pos = 0; # reset to start of $_
+
+  # VZhestkov / just remove %{**} and %{lua:} for a while. Need to check if possible to implement.
+  s/%\{\??\*{1,2}\}//g; # replace 'all arguments'
+  s/\A%\{lua:.*\}\z//s;
 
   # Expand 'simple' '%{macros}': %define's and %{all_the_rest}
   while (/%\{([a-z_]\w*)}/ig) {
@@ -1918,6 +1955,8 @@ sub expandmacros {
       s/%\{$key}/expandmacros($specglobals{$key})/eg;
     } elsif (defined $pkgdata{main}{$key}) {
       s/%\{$key}/expandmacros($pkgdata{main}{$key})/eg;
+    } else {
+      s/%\{$key}//g;
     }
   }
   pos = 0; # reset to start of $_
@@ -1925,9 +1964,11 @@ sub expandmacros {
   # unescape multi-line macros
   s/\\"/"/g;
   s/\\\\(\w)/\\$1/g;
-  s/(\S)\\+\n/$1\n/g;
+  s/(\S)\\\n/$1\n/g;
+  s/([\A|\n])(\s*)\\\n/$1$2\n/g;
   # revert changes of dir macro because of spcial use in %files
   s/%\{dir\}/%dir/g;
+  vdebug($_, 5, "expandmacros/out");
   return $_;
 } # end expandmacros()
 
