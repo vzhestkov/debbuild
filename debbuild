@@ -109,6 +109,27 @@ my %files_files=();
 
 my $debug_level = 3;
 
+my $lua_present;
+my $lua_api = {};
+
+$lua_present = eval {
+    require Lua::API;
+    1;
+};
+$lua_present //= 0;
+if ( $lua_present ) {
+  foreach my $lv ( qw/Lua::API::GLOBALSINDEX Lua::API::GCCOLLECT Lua::API::GCSTOP Lua::API::GCRESTART
+                      Lua::API::RELEASE Lua::API::State Lua::API::MULTRET/ ) {
+    eval('$lua_api->{\''.$lv.'\'} = '.$lv.';');
+  }
+}
+
+sub lua_get {
+  my ($v, $d) = @_;
+  return $lua_api->{$v} if defined($lua_api->{$v});
+  return $d;
+}
+
 #### main ####
 
 # Program flow:
