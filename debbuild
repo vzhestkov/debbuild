@@ -1965,7 +1965,7 @@ sub expandmacros {
   s/\\"/"/g;
   s/\\\\(\w)/\\$1/g;
   s/(\S)\\\n/$1\n/g;
-  s/([\A|\n])(\s*)\\\n/$1$2\n/g;
+  s/(\A|\n)(\s*)\\\n/$1$2\n/g;
   # revert changes of dir macro because of spcial use in %files
   s/%\{dir\}/%dir/g;
   vdebug($_, 5, "expandmacros/out");
