@@ -146,11 +146,15 @@ sub lua_traceback  {
 
 sub lua_print {
   my ($L) = @_;
-  my $p = $L->tostring(1);
+  my $n = $L->gettop();
   $L->pushstring("dt");
   $L->gettable(lua_get('Lua::API::REGISTRYINDEX'));
   my $dt = ${$L->touserdata(-1)};
-  $dt->{stdout} .= $p."\n";
+  for ( my $i = 1; $i <= $n; $i++ ) {
+    my $p = $L->tostring($i);
+    $dt->{stdout} .= ($i >1 ? "\t" : "").$p;
+  }
+  $dt->{stdout} .= "\n";
 }
 
 sub lua_pmain {
